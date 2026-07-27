@@ -292,6 +292,9 @@ fork(void)
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
+  // 新增：复制trace追踪掩码给子进程
+  np->trace_mask = p->trace_mask;
+
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
@@ -653,4 +656,13 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+int getnproc(void) {
+  int cnt = 0;
+  for(int i = 0; i < NPROC; i++){
+    if(proc[i].state != UNUSED)
+      cnt++;
+  }
+  return cnt;
 }
