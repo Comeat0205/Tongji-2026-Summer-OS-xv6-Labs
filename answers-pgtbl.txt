@@ -1,0 +1,15 @@
+Q1: Which other xv6 system call(s) could be made faster using this shared USYSCALL page? Explain how.
+A: System calls like getppid can be optimized. The parent process ID of a process will not change during the entire lifecycle of the process. We can store ppid in the read-only USYSCALL shared page mapped to every process. User space programs can directly read the value from this page without invoking a system call and switching to kernel mode, which eliminates the trap overhead and speeds up the function call. Other examples include uptime if we store global tick count on this page.
+
+Q2: What does page 0 (virtual address 0 ~ PGSIZE) contain?
+A: Virtual page 0 has no valid page table entry, no physical memory is allocated for it. The operating system intentionally leaves VA0 unmapped. This design can catch null pointer dereference errors when user programs access address zero.
+
+Q3: What about virtual page 2 (VA = 2 * PGSIZE)?
+A: Virtual page 2 is part of the user text segment of the init program. Its PTE has PTE_R and PTE_X permission bits, no write bit. This page stores the executable machine instructions of the init binary.
+
+Q4: In user mode, can you read page 1? Can you write page 1?
+A: User mode can read page 1 normally, but cannot write to it. Page 1 also belongs to the read-only code segment, only PTE_R and PTE_U are set in its PTE, without PTE_W. Any write operation from user space will trigger a page fault and kill the process.
+
+Q5: What data is stored in the user stack virtual page (the penultimate virtual page before TRAPFRAME)?
+A: The penultimate virtual page is the user stack. It has PTE_R and PTE_W permissions. It stores function stack frames, local variables, return addresses and temporary data for user programs. The very last page below TRAPFRAME is trapframe, which is only accessible by the kernel to save all CPU registers during user-kernel traps.
+
