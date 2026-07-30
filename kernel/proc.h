@@ -104,5 +104,14 @@ struct proc {
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
+
+  // 新增：alarm 定时相关
+  int alarm_interval;
+  uint64 handler_va;
+  int passed_ticks;
+  int have_return;
+  struct trapframe saved_trapframe;
+
   char name[16];               // Process name (debugging)
 };
+

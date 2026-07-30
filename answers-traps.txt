@@ -1,0 +1,8 @@
+Q: Which registers contain arguments to function g?
+A: a0 holds the first argument x.
+
+Q: What does addiw a0,a0,3 do?
+A: Compute x+3 and store the result in a0, which is the return value register.
+
+Q: Where is the return address for g?
+A: The return address ra is saved on the stack.

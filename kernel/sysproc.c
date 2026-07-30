@@ -55,6 +55,7 @@ sys_sbrk(void)
 uint64
 sys_sleep(void)
 {
+  backtrace(); // 新增栈回溯打印
   int n;
   uint ticks0;
 
@@ -94,4 +95,36 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// 新增 sigalarm 系统调用
+uint64
+sys_sigalarm(void)
+{
+  struct proc *p = myproc();
+  int n;
+  uint64 handler;
+  // 取第一个参数：间隔tick
+  if(argint(0, &n) < 0)
+    return -1;
+  // 取第二个参数：函数指针地址
+  if(argaddr(1, &handler) < 0)
+    return -1;
+
+  p->alarm_interval = n;
+  p->handler_va = handler;
+  p->passed_ticks = 0;
+  p->have_return = 1;
+  return 0;
+}
+
+// 新增 sigreturn 系统调用
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  // 把保存的中断现场完整还原到当前trapframe
+  *p->trapframe = p->saved_trapframe;
+  p->have_return = 1;
+  return 0;
 }

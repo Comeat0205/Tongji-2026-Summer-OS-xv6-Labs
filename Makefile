@@ -188,6 +188,10 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
+	$U/_lab4_test\
+	$U/_lab4_test2\
+	$U/_lab4_test3\
+	$U/_alarmtest\
 
 
 

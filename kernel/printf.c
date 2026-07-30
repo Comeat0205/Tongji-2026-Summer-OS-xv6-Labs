@@ -132,3 +132,21 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+// lab4新增
+void backtrace(void)
+{
+  uint64 fp = r_fp();
+  printf("backtrace:\n");
+  // 循环条件：fp必须在当前内核栈单页内，超出栈页停止遍历
+  while(PGROUNDDOWN(fp) == PGROUNDDOWN(fp)){
+    // fp-8：栈帧中保存的函数返回地址ra
+    uint64 ra = *(uint64 *)(fp - 8);
+    printf("%p\n", ra);
+    // fp-16：上一级调用者的栈帧指针
+    fp = *(uint64 *)(fp - 16);
+    // 退出循环：帧指针走到栈页面底部，停止，防止越界死循环
+    if(fp == PGROUNDDOWN(fp))
+      break;
+  }
+}
