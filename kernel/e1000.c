@@ -96,13 +96,41 @@ int
 e1000_transmit(struct mbuf *m)
 {
   //
-  // Your code here.
-  //
   // the mbuf contains an ethernet frame; program it into
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  int i;
+
+  acquire(&e1000_lock);
+
+  // ask the E1000 for the TX ring index at which it's expecting the next packet
+  i = regs[E1000_TDT];
+
+  // check if the ring is overflowing: DD must be set (previous TX finished)
+  if((tx_ring[i].status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // free the last mbuf that was transmitted from that descriptor (if any)
+  if(tx_mbufs[i])
+    mbuffree(tx_mbufs[i]);
+
+  // fill in the descriptor
+  tx_mbufs[i] = m;
+  tx_ring[i].addr = (uint64)m->head;
+  tx_ring[i].length = m->len;
+  tx_ring[i].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  // EOP: end of packet; RS: report status (sets DD when done)
+
+  // ensure the descriptor is written before the E1000 sees the new TDT
+  __sync_synchronize();
+
+  // update the ring position
+  regs[E1000_TDT] = (i + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
@@ -110,11 +138,45 @@ static void
 e1000_recv(void)
 {
   //
-  // Your code here.
-  //
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  int i;
+  struct mbuf *m;
+
+  for(;;){
+    acquire(&e1000_lock);
+
+    // next waiting received packet is at RDT+1
+    i = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+    // check if a new packet is available
+    if((rx_ring[i].status & E1000_RXD_STAT_DD) == 0){
+      release(&e1000_lock);
+      return;
+    }
+
+    // deliver the received packet to the network stack
+    m = rx_mbufs[i];
+    m->len = rx_ring[i].length;
+
+    // allocate a new mbuf for this descriptor for the next packet
+    rx_mbufs[i] = mbufalloc(0);
+    if(!rx_mbufs[i])
+      panic("e1000");
+    rx_ring[i].addr = (uint64)rx_mbufs[i]->head;
+    rx_ring[i].status = 0;
+
+    __sync_synchronize();
+
+    // tell the E1000 that this descriptor is free again
+    regs[E1000_RDT] = i;
+
+    release(&e1000_lock);
+
+    // must release lock before net_rx: ARP reply may call e1000_transmit
+    net_rx(m);
+  }
 }
 
 void
