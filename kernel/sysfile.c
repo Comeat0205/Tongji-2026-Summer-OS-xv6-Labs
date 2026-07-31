@@ -8,6 +8,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"
+#include "memlayout.h"
 #include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
@@ -481,6 +482,263 @@ sys_pipe(void)
     fileclose(rf);
     fileclose(wf);
     return -1;
+  }
+  return 0;
+}
+
+// Starting virtual address for mmap regions (below TRAPFRAME).
+#define MMAPBASE 0x40000000L
+
+// Find a free VMA slot.
+static struct vma*
+vmaalloc(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vma[i].valid)
+      return &p->vma[i];
+  }
+  return 0;
+}
+
+// Find the VMA that contains va.
+static struct vma*
+vmafind(struct proc *p, uint64 va)
+{
+  for(int i = 0; i < NVMA; i++){
+    struct vma *v = &p->vma[i];
+    if(v->valid && va >= v->addr && va < v->addr + v->length)
+      return v;
+  }
+  return 0;
+}
+
+// Choose a virtual address for a new mapping of 'length' bytes.
+static uint64
+vmachooseaddr(struct proc *p, uint64 length)
+{
+  uint64 addr = MMAPBASE;
+  int changed;
+  do {
+    changed = 0;
+    for(int i = 0; i < NVMA; i++){
+      struct vma *v = &p->vma[i];
+      if(v->valid && addr < v->addr + v->length && addr + length > v->addr){
+        addr = PGROUNDUP(v->addr + v->length);
+        changed = 1;
+      }
+    }
+  } while(changed);
+
+  if(addr + length > TRAPFRAME)
+    return 0;
+  return addr;
+}
+
+// Write one mapped page back to the file (MAP_SHARED).
+static void
+vmawriteback(struct proc *p, struct vma *v, uint64 va)
+{
+  uint64 pa;
+  struct file *f = v->f;
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  uint64 off = v->offset + (va - v->addr);
+  int n = PGSIZE;
+  int i = 0;
+
+  if((v->flags & MAP_SHARED) == 0)
+    return;
+  if((v->prot & PROT_WRITE) == 0)
+    return;
+  if(f == 0 || f->writable == 0)
+    return;
+
+  pa = walkaddr(p->pagetable, va);
+  if(pa == 0)
+    return;
+
+  while(i < n){
+    int n1 = n - i;
+    if(n1 > max)
+      n1 = max;
+    begin_op();
+    ilock(f->ip);
+    writei(f->ip, 0, pa + i, off + i, n1);
+    iunlock(f->ip);
+    end_op();
+    i += n1;
+  }
+}
+
+// Unmap pages starting at va within VMA v; write back if needed.
+static void
+vmaunmap(struct proc *p, struct vma *v, uint64 va, uint64 size)
+{
+  for(uint64 a = va; a < va + size; a += PGSIZE){
+    uint64 pa = walkaddr(p->pagetable, a);
+    if(pa == 0)
+      continue;
+    vmawriteback(p, v, a);
+    uvmunmap(p->pagetable, a, 1, 1);
+  }
+}
+
+// Unmap all VMAs for process p (used by exit).
+void
+vmafree(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    struct vma *v = &p->vma[i];
+    if(!v->valid)
+      continue;
+    vmaunmap(p, v, v->addr, v->length);
+    if(v->f){
+      fileclose(v->f);
+      v->f = 0;
+    }
+    v->valid = 0;
+    v->length = 0;
+  }
+}
+
+// Handle a page fault in an mmap region.
+// write==1 if it was a store fault.
+// Returns 0 on success, -1 on failure.
+int
+mmapfault(uint64 va, int write)
+{
+  struct proc *p = myproc();
+  struct vma *v;
+  char *mem;
+  uint64 off;
+  int perm;
+
+  if(va >= MAXVA)
+    return -1;
+  va = PGROUNDDOWN(va);
+
+  v = vmafind(p, va);
+  if(v == 0)
+    return -1;
+  if(write && (v->prot & PROT_WRITE) == 0)
+    return -1;
+  if(!write && (v->prot & PROT_READ) == 0 && (v->prot & PROT_WRITE) == 0)
+    return -1;
+
+  mem = kalloc();
+  if(mem == 0)
+    return -1;
+  memset(mem, 0, PGSIZE);
+
+  off = v->offset + (va - v->addr);
+  ilock(v->f->ip);
+  readi(v->f->ip, 0, (uint64)mem, off, PGSIZE);
+  iunlock(v->f->ip);
+
+  perm = PTE_U;
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_W | PTE_R;
+  if(v->prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr, length;
+  int prot, flags, fd, offset;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *v;
+
+  if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0 ||
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argint(4, &fd) < 0 || argint(5, &offset) < 0)
+    return -1;
+
+  if(length == 0)
+    return -1;
+  if(offset != 0)
+    return -1;
+  if(addr != 0)
+    return -1;
+  if((flags & MAP_SHARED) == 0 && (flags & MAP_PRIVATE) == 0)
+    return -1;
+
+  if(fd < 0 || fd >= NOFILE || (f = p->ofile[fd]) == 0)
+    return -1;
+  if(f->type != FD_INODE)
+    return -1;
+  if((prot & PROT_WRITE) && (flags & MAP_SHARED) && f->writable == 0)
+    return -1;
+  if(f->readable == 0)
+    return -1;
+
+  length = PGROUNDUP(length);
+
+  v = vmaalloc(p);
+  if(v == 0)
+    return -1;
+
+  addr = vmachooseaddr(p, length);
+  if(addr == 0)
+    return -1;
+
+  v->valid = 1;
+  v->addr = addr;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->offset = offset;
+  v->f = filedup(f);
+
+  return addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length;
+  struct proc *p = myproc();
+  struct vma *v;
+
+  if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0)
+    return -1;
+  if(length == 0)
+    return -1;
+  if(addr % PGSIZE)
+    return -1;
+
+  length = PGROUNDUP(length);
+
+  v = vmafind(p, addr);
+  if(v == 0)
+    return -1;
+  if(!(addr == v->addr || addr + length == v->addr + v->length))
+    return -1;
+  if(addr + length > v->addr + v->length)
+    return -1;
+
+  vmaunmap(p, v, addr, length);
+
+  if(addr == v->addr && length == v->length){
+    fileclose(v->f);
+    v->f = 0;
+    v->valid = 0;
+    v->length = 0;
+  } else if(addr == v->addr){
+    v->addr += length;
+    v->offset += length;
+    v->length -= length;
+  } else {
+    v->length -= length;
   }
   return 0;
 }

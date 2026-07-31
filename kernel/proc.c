@@ -164,6 +164,11 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  for(int i = 0; i < NVMA; i++){
+    p->vma[i].valid = 0;
+    p->vma[i].length = 0;
+    p->vma[i].f = 0;
+  }
 }
 
 // Create a user page table for a given process,
@@ -301,6 +306,15 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // copy mmap VMAs; child will fault in pages lazily
+  for(i = 0; i < NVMA; i++){
+    if(p->vma[i].valid){
+      np->vma[i] = p->vma[i];
+      if(p->vma[i].f)
+        np->vma[i].f = filedup(p->vma[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -343,6 +357,9 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Unmap mmap regions (write back MAP_SHARED pages).
+  vmafree(p);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
