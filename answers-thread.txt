@@ -1,0 +1,19 @@
+Question: Why are there missing keys with 2 threads, but not with 1 thread?
+Identify a sequence of events with 2 threads that can lead to a key being missing.
+
+Answer:
+put() inserts at the head of a bucket's linked list without synchronization.
+With one thread this is fine; with two threads that hash to the same bucket,
+both can read the same old head and then overwrite table[i], losing an entry.
+
+Example race (keys k1 and k2 both hash to bucket i; table[i] initially NULL):
+
+1. Thread T1 in put(k1): sees table[i] == NULL, decides to insert.
+2. Thread T2 in put(k2): also sees table[i] == NULL, decides to insert.
+3. T1: insert allocates e1, sets e1->next = NULL, then *p = e1 so table[i] = e1.
+4. T2: insert allocates e2, sets e2->next = NULL (the old value T2 observed),
+   then *p = e2 so table[i] = e2.
+
+Now table[i] points only to e2; e1 (and key k1) is lost, so later get(k1)
+reports a missing key. A per-bucket lock around the search+insert in put
+(and the search in get) prevents this interleaving.
